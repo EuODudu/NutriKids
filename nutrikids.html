@@ -858,7 +858,14 @@ async _handleAuth(role,tab){
     } else {
       profile.institution=$('f-inst')?.value.trim()||'';
     }
-    const {data,error}=await supabaseClient.auth.signUp({email,password:pass,options:{data:profile}});
+    const {data,error}=await supabaseClient.auth.signUp({
+      email,
+      password:pass,
+      options:{
+        data:profile,
+        emailRedirectTo:window.location.origin
+      }
+    });
     if(error){
       msgEl.innerHTML='<div class="alert alert-error">'+error.message+'</div>';
       if(btn){btn.disabled=false;btn.textContent='Criar Conta'}
