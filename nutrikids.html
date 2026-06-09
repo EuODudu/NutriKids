@@ -223,42 +223,211 @@ h1{font-size:1.8rem}h2{font-size:1.4rem}h3{font-size:1.1rem}
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 // =========================================================
-//  DATABASE (Supabase + cache local)
+//  DATABASE (Supabase relacional + cache em memória)
 // =========================================================
 const SUPABASE_URL='https://jnwmzfnegvgwhvlufbpi.supabase.co';
 const SUPABASE_KEY='sb_publishable_YZHNdfWgltQ3Cxkw2l0KXw_CUIUASXU';
 const supabaseClient=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+const _cache={session:null};
+
+function mapProfile(r){
+  return{id:r.id,name:r.name,email:r.email,role:r.role,age:r.age,activity:r.activity,institution:r.institution,groupId:r.group_id,points:r.points||0,badges:r.badges||[],createdAt:r.created_at};
+}
+function mapGroup(r){
+  return{id:r.id,name:r.name,desc:r.description||'',code:r.code,ownerId:r.owner_id,createdAt:r.created_at};
+}
+function mapChallenge(r){
+  return{id:r.id,title:r.title,description:r.description,groupId:r.group_id,dueDate:r.due_date,materials:r.materials||[],ownerId:r.owner_id,createdAt:r.created_at};
+}
+function mapCompletion(r){
+  return{id:r.id,challengeId:r.challenge_id,userId:r.user_id,completedAt:r.completed_at};
+}
+function mapProgress(r){
+  return{completedModules:r.completed_modules||[],completedTrails:r.completed_trails||[],recipesViewed:r.recipes_viewed||0,totalCorrect:r.total_correct||0,quizzesDone:r.quizzes_done||0,challengesDone:r.challenges_done||0};
+}
+function mapLibrary(r){
+  return{id:r.id,title:r.title,type:r.type,desc:r.description||'',link:r.link||'',createdAt:r.created_at};
+}
+function mapNote(r){
+  return{id:r.id,title:r.title,content:r.content,groupId:r.group_id||'',createdAt:r.created_at};
+}
+function profileRow(u){
+  return{id:u.id,name:u.name,email:u.email,role:u.role,age:u.age??null,activity:u.activity??null,institution:u.institution??null,group_id:u.groupId??null,points:u.points??0,badges:u.badges??[],created_at:u.createdAt||new Date().toISOString()};
+}
+function groupRow(g){
+  return{id:g.id,name:g.name,description:g.desc||'',code:g.code,owner_id:g.ownerId,created_at:g.createdAt||new Date().toISOString()};
+}
+function challengeRow(c){
+  return{id:c.id,title:c.title,description:c.description,group_id:c.groupId,due_date:c.dueDate,materials:c.materials||[],owner_id:c.ownerId,created_at:c.createdAt||new Date().toISOString()};
+}
+function completionRow(c){
+  return{id:c.id,challenge_id:c.challengeId,user_id:c.userId,completed_at:c.completedAt||new Date().toISOString()};
+}
+function progressRow(uid,p){
+  return{user_id:uid,completed_modules:p.completedModules||[],completed_trails:p.completedTrails||[],recipes_viewed:p.recipesViewed||0,total_correct:p.totalCorrect||0,quizzes_done:p.quizzesDone||0,challenges_done:p.challengesDone||0};
+}
+function libraryRow(uid,item){
+  return{id:item.id,owner_id:uid,title:item.title,type:item.type||'Texto',description:item.desc||'',link:item.link||'',created_at:item.createdAt||new Date().toISOString()};
+}
+function noteRow(uid,n){
+  return{id:n.id,owner_id:uid,title:n.title,content:n.content,group_id:n.groupId||null,created_at:n.createdAt||new Date().toISOString()};
+}
 
 const DB = {
-  get(k){try{return JSON.parse(localStorage.getItem('nk_'+k))}catch{return null}},
-  set(k,v){localStorage.setItem('nk_'+k,JSON.stringify(v));this.saveRemote(k,v)},
+  _clear(){
+    _cache.session=null;
+    _cache.users=[];
+    _cache.groups=[];
+    _cache.challenges=[];
+    _cache.completions=[];
+    Object.keys(_cache).forEach(k=>{
+      if(k.startsWith('progress_')||k.startsWith('library_')||k.startsWith('notes_'))delete _cache[k];
+    });
+  },
+  get(k){
+    if(k==='session')return _cache.session;
+    return _cache[k]??null;
+  },
+  set(k,v){
+    if(k==='session'){_cache.session=v;return;}
+    _cache[k]=v;
+    this._persist(k,v);
+  },
   list(k){return this.get(k)||[]},
-  add(k,item){const l=this.list(k);l.push(item);this.set(k,l);return item},
-  update(k,id,patch){const l=this.list(k);const i=l.findIndex(x=>x.id===id);if(i>-1){l[i]={...l[i],...patch};this.set(k,l)}},
-  remove(k,id){this.set(k,this.list(''+k).filter(x=>x.id!==id))},
-  currentUser(){return this.get('session')},
-  login(u){this.set('session',u)},
-  async logout(){localStorage.removeItem('nk_session');await supabaseClient.auth.signOut()},
+  add(k,item){
+    const l=this.list(k);l.push(item);_cache[k]=l;
+    this._insert(k,item);
+    return item;
+  },
+  update(k,id,patch){
+    const l=this.list(k);
+    const i=l.findIndex(x=>x.id===id);
+    if(i>-1){l[i]={...l[i],...patch};_cache[k]=l;this._updateRow(k,l[i]);}
+  },
+  remove(k,id){
+    _cache[k]=this.list(k).filter(x=>x.id!==id);
+    this._deleteRow(k,id);
+  },
+  currentUser(){return _cache.session},
+  login(u){_cache.session=u},
+  async logout(){this._clear();await supabaseClient.auth.signOut()},
   uid(){return crypto.randomUUID?crypto.randomUUID():'id_'+Date.now()+'_'+Math.random().toString(36).slice(2,7)},
+  async lookupGroupByCode(code){
+    const {data,error}=await supabaseClient.rpc('lookup_group_by_code',{p_code:code});
+    if(error||!data?.length)return null;
+    return{id:data[0].id,name:data[0].name,code:data[0].code};
+  },
   async init(){
-    await this.loadRemote();
     const {data:{session}}=await supabaseClient.auth.getSession();
+    if(session?.user)await this.loadRemote();
+    else this._clear();
     if(session?.user){
       const profile=this.list('users').find(u=>u.id===session.user.id);
       if(profile)this.login(profile);
-    }else{
-      localStorage.removeItem('nk_session');
     }
   },
   async loadRemote(){
-    const {data,error}=await supabaseClient.from('nutrikids_data').select('key,value');
-    if(error){console.warn('Falha ao carregar dados do Supabase:',error.message);return;}
-    (data||[]).forEach(row=>localStorage.setItem('nk_'+row.key,JSON.stringify(row.value)));
+    const {data:{session}}=await supabaseClient.auth.getSession();
+    if(!session?.user){this._clear();return;}
+    const uid=session.user.id;
+    this._clear();
+    const {data:me,error:meErr}=await supabaseClient.from('profiles').select('*').eq('id',uid).maybeSingle();
+    if(meErr||!me)return;
+    const users=[mapProfile(me)];
+    _cache.groups=[];
+    _cache.challenges=[];
+    _cache.completions=[];
+    if(me.role==='pro'){
+      const {data:groups}=await supabaseClient.from('groups').select('*').eq('owner_id',uid);
+      _cache.groups=(groups||[]).map(mapGroup);
+      const groupIds=_cache.groups.map(g=>g.id);
+      if(groupIds.length){
+        const {data:kids}=await supabaseClient.from('profiles').select('*').eq('role','kid').in('group_id',groupIds);
+        users.push(...(kids||[]).map(mapProfile));
+        const {data:chals}=await supabaseClient.from('challenges').select('*').in('group_id',groupIds);
+        _cache.challenges=(chals||[]).map(mapChallenge);
+        const kidIds=(kids||[]).map(k=>k.id);
+        if(kidIds.length){
+          const {data:comps}=await supabaseClient.from('completions').select('*').in('user_id',kidIds);
+          _cache.completions=(comps||[]).map(mapCompletion);
+          for(const kid of kids||[])await this._loadProgress(kid.id);
+        }
+      }
+      await this._loadLibrary(uid);
+      await this._loadNotes(uid);
+    }else{
+      if(me.group_id){
+        const {data:group}=await supabaseClient.from('groups').select('*').eq('id',me.group_id).maybeSingle();
+        if(group)_cache.groups=[mapGroup(group)];
+        const {data:chals}=await supabaseClient.from('challenges').select('*').eq('group_id',me.group_id);
+        _cache.challenges=(chals||[]).map(mapChallenge);
+      }
+      const {data:comps}=await supabaseClient.from('completions').select('*').eq('user_id',uid);
+      _cache.completions=(comps||[]).map(mapCompletion);
+      await this._loadProgress(uid);
+    }
+    _cache.users=users;
   },
-  async saveRemote(k,v){
-    if(k==='session')return;
-    const {error}=await supabaseClient.from('nutrikids_data').upsert({key:k,value:v,updated_at:new Date().toISOString()});
-    if(error)console.warn('Falha ao salvar no Supabase:',k,error.message);
+  async _loadProgress(uid){
+    const {data}=await supabaseClient.from('progress').select('*').eq('user_id',uid).maybeSingle();
+    _cache['progress_'+uid]=data?mapProgress(data):{completedModules:[],completedTrails:[],recipesViewed:0,totalCorrect:0,quizzesDone:0,challengesDone:0};
+  },
+  async _loadLibrary(uid){
+    const {data}=await supabaseClient.from('library_items').select('*').eq('owner_id',uid).order('created_at',{ascending:false});
+    _cache['library_'+uid]=(data||[]).map(mapLibrary);
+  },
+  async _loadNotes(uid){
+    const {data}=await supabaseClient.from('notes').select('*').eq('owner_id',uid).order('created_at',{ascending:false});
+    _cache['notes_'+uid]=(data||[]).map(mapNote);
+  },
+  async _insert(k,item){
+    let error;
+    if(k==='users')({error}=await supabaseClient.from('profiles').insert(profileRow(item)));
+    else if(k==='groups')({error}=await supabaseClient.from('groups').insert(groupRow(item)));
+    else if(k==='challenges')({error}=await supabaseClient.from('challenges').insert(challengeRow(item)));
+    else if(k==='completions')({error}=await supabaseClient.from('completions').insert(completionRow(item)));
+    if(error)console.warn('Falha ao inserir',k,error.message);
+  },
+  async _updateRow(k,item){
+    let error;
+    if(k==='users')({error}=await supabaseClient.from('profiles').update(profileRow(item)).eq('id',item.id));
+    else if(k==='groups')({error}=await supabaseClient.from('groups').update(groupRow(item)).eq('id',item.id));
+    else if(k==='challenges')({error}=await supabaseClient.from('challenges').update(challengeRow(item)).eq('id',item.id));
+    if(error)console.warn('Falha ao atualizar',k,error.message);
+  },
+  async _deleteRow(k,id){
+    let error;
+    if(k==='groups')({error}=await supabaseClient.from('groups').delete().eq('id',id));
+    else if(k==='challenges')({error}=await supabaseClient.from('challenges').delete().eq('id',id));
+    else if(k==='completions')({error}=await supabaseClient.from('completions').delete().eq('id',id));
+    if(error)console.warn('Falha ao excluir',k,error.message);
+  },
+  async _persist(k,v){
+    if(k.startsWith('progress_')){
+      const uid=k.slice(9);
+      const {error}=await supabaseClient.from('progress').upsert(progressRow(uid,v));
+      if(error)console.warn('Falha ao salvar progresso',error.message);
+    }else if(k.startsWith('library_')){
+      const uid=k.slice(8);
+      const {data:existing}=await supabaseClient.from('library_items').select('id').eq('owner_id',uid);
+      const ids=new Set((v||[]).map(i=>i.id));
+      const toDelete=(existing||[]).filter(r=>!ids.has(r.id)).map(r=>r.id);
+      if(toDelete.length)await supabaseClient.from('library_items').delete().in('id',toDelete);
+      if(v?.length){
+        const {error}=await supabaseClient.from('library_items').upsert(v.map(i=>libraryRow(uid,i)));
+        if(error)console.warn('Falha ao salvar biblioteca',error.message);
+      }
+    }else if(k.startsWith('notes_')){
+      const uid=k.slice(6);
+      const {data:existing}=await supabaseClient.from('notes').select('id').eq('owner_id',uid);
+      const ids=new Set((v||[]).map(n=>n.id));
+      const toDelete=(existing||[]).filter(r=>!ids.has(r.id)).map(r=>r.id);
+      if(toDelete.length)await supabaseClient.from('notes').delete().in('id',toDelete);
+      if(v?.length){
+        const {error}=await supabaseClient.from('notes').upsert(v.map(n=>noteRow(uid,n)));
+        if(error)console.warn('Falha ao salvar observações',error.message);
+      }
+    }
   }
 };
 
@@ -672,13 +841,14 @@ async _handleAuth(role,tab){
       return;
     }
     const profile={name,email,role,points:0,badges:[],createdAt:new Date().toISOString()};
+    let linkedGroup=null;
     if(role==='kid'){
       profile.age=parseInt($('f-age')?.value)||12;
       profile.activity=$('f-activity')?.value||'medio';
       const code=$('f-code')?.value.trim().toUpperCase();
       if(code){
-        const g=DB.list('groups').find(x=>x.code===code);
-        if(g){profile.groupId=g.id;}
+        linkedGroup=await DB.lookupGroupByCode(code);
+        if(linkedGroup){profile.groupId=linkedGroup.id;}
         else{
           msgEl.innerHTML='<div class="alert alert-error">Código de turma inválido.</div>';
           if(btn){btn.disabled=false;btn.textContent='Criar Conta'}
@@ -699,15 +869,13 @@ async _handleAuth(role,tab){
       if(btn){btn.disabled=false;btn.textContent='Criar Conta'}
       return;
     }
-    await DB.loadRemote();
-    if(DB.list('users').find(x=>x.email===email)){
-      msgEl.innerHTML='<div class="alert alert-error">E-mail já cadastrado.</div>';
-      if(btn){btn.disabled=false;btn.textContent='Criar Conta'}
-      return;
-    }
     const u={id:data.user.id,...profile};
     DB.add('users',u);DB.login(u);
-    if(u.groupId){const g=DB.list('groups').find(x=>x.id===u.groupId);if(g)toast('Turma vinculada: '+g.name+'!')}
+    _cache.users=[u];
+    if(u.groupId&&linkedGroup){
+      _cache.groups=[{id:linkedGroup.id,name:linkedGroup.name,code:linkedGroup.code,desc:'',ownerId:'',createdAt:new Date().toISOString()}];
+      toast('Turma vinculada: '+linkedGroup.name+'!');
+    }
     saveProgress(u.id,{});
     checkBadges(u);
     role==='kid'?nav('kid-dashboard'):nav('pro-dashboard');
@@ -1124,12 +1292,18 @@ kidProfile(){
     </div>
   </div>`);
 },
-_joinGroup(){
+async _joinGroup(){
   const u=DB.currentUser();
   const code=$('code-inp')?.value.trim().toUpperCase();
-  const g=DB.list('groups').find(x=>x.code===code);
+  const g=await DB.lookupGroupByCode(code);
   if(!g){$('group-msg').innerHTML='<div class="alert alert-error">Código inválido.</div>';return;}
   u.groupId=g.id;DB.login(u);DB.update('users',u.id,{groupId:g.id});
+  if(!DB.list('groups').find(x=>x.id===g.id)){
+    _cache.groups=[...DB.list('groups'),{id:g.id,name:g.name,code:g.code,desc:'',ownerId:'',createdAt:new Date().toISOString()}];
+  }
+  await DB.loadRemote();
+  const refreshed=DB.list('users').find(x=>x.id===u.id)||u;
+  DB.login(refreshed);
   toast('Entrou na turma: '+g.name+'!');nav('kid-profile');
 },
 
